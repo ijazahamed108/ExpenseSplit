@@ -55,3 +55,8 @@ The server will be running at http://localhost:3000
 - MongoDB (with Mongoose)
 - Caching (JavaScript Map)
 
+## Usage
+
+### Refer Curls doc , to run test using postman
+
+
