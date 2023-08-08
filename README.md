@@ -37,7 +37,7 @@ The server will be running at http://localhost:3000
 
 - Use API endpoints to create users, add expenses, record repayments, and check balances.
 - Test the endpoints using tools like Postman or your preferred API client.
-- Refer to the API documentation or Swagger documentation for detailed endpoint information.
+- Refer to the API documentation Curls Doc in project folder
 
 ## API Endpoints
 
