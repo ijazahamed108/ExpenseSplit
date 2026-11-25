@@ -1,0 +1,20 @@
+services:
+  app:
+    build: .
+    image: expensesplit:latest
+    container_name: expensesplit
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_PATH: /data/expensesplit.db
+      API_KEY: ${API_KEY:-}
+      DEFAULT_CURRENCY: ${DEFAULT_CURRENCY:-USD}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      ENABLE_DEMO_SEED: ${ENABLE_DEMO_SEED:-true}
+    volumes:
+      - expensesplit-data:/data
+    restart: unless-stopped
+
+volumes:
+  expensesplit-data:

@@ -1,0 +1,442 @@
+openapi: 3.0.3
+info:
+  title: ExpenseSplit API
+  version: 2.0.0
+  description: |
+    REST API for a modern bill-splitting app: people, groups, flexible expense splits
+    (equal / exact / percent / shares), settlements, derived balances and settle-up suggestions.
+
+    All monetary values are decimal numbers in the group's currency (e.g. `12.5`).
+    Internally they are stored as integer cents and splits always add up exactly to the total.
+
+    If the server is started with `API_KEY`, send it as `x-api-key` (or `Authorization: Bearer …`).
+servers:
+  - url: /api/v1
+tags:
+  - { name: Users }
+  - { name: Groups }
+  - { name: Expenses }
+  - { name: Settlements }
+  - { name: Balances }
+  - { name: Demo }
+
+security:
+  - ApiKey: []
+  - {}
+
+paths:
+  /users:
+    get:
+      tags: [Users]
+      summary: List users
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/User' } } } } }
+    post:
+      tags: [Users]
+      summary: Create a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUser' }
+            example: { name: Aisha Khan, email: aisha@example.com }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /users/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Users]
+      summary: Get a user
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Users]
+      summary: Update a user
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/UpdateUser' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Users]
+      summary: Delete a user (only if they belong to no groups)
+      responses:
+        '204': { description: Deleted }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /users/{id}/balances:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Balances]
+      summary: Net balance of a user across all their groups
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/UserBalances' } } } }
+
+  /groups:
+    get:
+      tags: [Groups]
+      summary: List groups (optionally only those a user belongs to)
+      parameters:
+        - { name: userId, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Group' } } } } }
+    post:
+      tags: [Groups]
+      summary: Create a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateGroup' }
+            example: { name: Lisbon Trip, currency: EUR, memberIds: [] }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Group' } } } }
+  /groups/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Groups]
+      summary: Get a group with members and stats
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Group' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Groups]
+      summary: Rename / describe a group
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateGroup' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Group' } } } }
+    delete:
+      tags: [Groups]
+      summary: Delete a group and everything in it
+      responses:
+        '204': { description: Deleted }
+  /groups/{groupId}/members:
+    parameters: [{ $ref: '#/components/parameters/GroupId' }]
+    post:
+      tags: [Groups]
+      summary: Add a member
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [userId], properties: { userId: { type: string, format: uuid } } } } } }
+      responses:
+        '201': { description: Added, content: { application/json: { schema: { $ref: '#/components/schemas/Group' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /groups/{groupId}/members/{userId}:
+    parameters:
+      - { $ref: '#/components/parameters/GroupId' }
+      - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [Groups]
+      summary: Remove a member (must have a zero balance)
+      responses:
+        '200': { description: Removed, content: { application/json: { schema: { $ref: '#/components/schemas/Group' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /groups/{groupId}/expenses:
+    parameters: [{ $ref: '#/components/parameters/GroupId' }]
+    get:
+      tags: [Expenses]
+      summary: List expenses in a group (newest first)
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Expense' } }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+    post:
+      tags: [Expenses]
+      summary: Add an expense
+      description: |
+        `participants[].value` depends on `splitType`:
+        * `equal` – ignored
+        * `exact` – each participant's amount; must sum to `amount`
+        * `percent` – each participant's percentage; must sum to 100
+        * `shares` – integer weights (e.g. 2 for someone who had two portions)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateExpense' }
+            examples:
+              equal:
+                value: { description: Dinner, amount: 90, paidBy: 11111111-1111-4111-8111-111111111111, splitType: equal, participants: [{ userId: 11111111-1111-4111-8111-111111111111 }, { userId: 22222222-2222-4222-8222-222222222222 }] }
+              shares:
+                value: { description: Pizza, amount: 30, paidBy: 11111111-1111-4111-8111-111111111111, splitType: shares, participants: [{ userId: 11111111-1111-4111-8111-111111111111, value: 2 }, { userId: 22222222-2222-4222-8222-222222222222, value: 1 }] }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Expense' } } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /expenses/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Expenses]
+      summary: Get an expense with its splits
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Expense' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Expenses]
+      summary: Edit an expense (splits are recomputed)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UpdateExpense' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Expense' } } } }
+    delete:
+      tags: [Expenses]
+      summary: Delete an expense (soft delete; stays in activity feed)
+      responses:
+        '204': { description: Deleted }
+
+  /groups/{groupId}/settlements:
+    parameters: [{ $ref: '#/components/parameters/GroupId' }]
+    get:
+      tags: [Settlements]
+      summary: List settlements in a group
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Settlement' } } } } }
+    post:
+      tags: [Settlements]
+      summary: Record a payment from one member to another
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSettlement' }
+            example: { fromUserId: 22222222-2222-4222-8222-222222222222, toUserId: 11111111-1111-4111-8111-111111111111, amount: 45, note: Venmo }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Settlement' } } } }
+  /settlements/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    delete:
+      tags: [Settlements]
+      summary: Undo a settlement (soft delete)
+      responses:
+        '204': { description: Deleted }
+
+  /groups/{groupId}/balances:
+    parameters: [{ $ref: '#/components/parameters/GroupId' }]
+    get:
+      tags: [Balances]
+      summary: Net, pairwise and simplified balances for a group
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GroupBalances' } } } }
+  /groups/{groupId}/activity:
+    parameters: [{ $ref: '#/components/parameters/GroupId' }]
+    get:
+      tags: [Balances]
+      summary: Recent activity feed (expenses + settlements, incl. deleted)
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ActivityItem' } } } } }
+
+  /demo/seed:
+    post:
+      tags: [Demo]
+      summary: Load demo data (requires ENABLE_DEMO_SEED=true)
+      parameters:
+        - { name: force, in: query, schema: { type: boolean }, description: Wipe existing data first }
+      responses:
+        '201': { description: Seeded }
+        '403': { description: Seeding disabled }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+components:
+  securitySchemes:
+    ApiKey: { type: apiKey, in: header, name: x-api-key }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    GroupId: { name: groupId, in: path, required: true, schema: { type: string, format: uuid } }
+  responses:
+    NotFound: { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Conflict: { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    ValidationError: { description: Validation error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unprocessable: { description: Semantically invalid (e.g. splits don't add up), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details: { }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateUser:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 80 }
+        email: { type: string, format: email }
+    UpdateUser:
+      type: object
+      properties:
+        name: { type: string }
+        email: { type: string, nullable: true }
+    Group:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        currency: { type: string, example: USD }
+        members: { type: array, items: { $ref: '#/components/schemas/User' } }
+        stats:
+          type: object
+          properties:
+            expenseCount: { type: integer }
+            totalSpent: { type: number }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateGroup:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        memberIds: { type: array, items: { type: string, format: uuid } }
+    UpdateGroup:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string, nullable: true }
+    Participant:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string, format: uuid }
+        value: { type: number, description: Meaning depends on splitType }
+    CreateExpense:
+      type: object
+      required: [description, amount, paidBy, splitType, participants]
+      properties:
+        description: { type: string, maxLength: 140 }
+        amount: { type: number, exclusiveMinimum: 0 }
+        paidBy: { type: string, format: uuid }
+        category: { type: string, example: food }
+        splitType: { type: string, enum: [equal, exact, percent, shares] }
+        participants: { type: array, items: { $ref: '#/components/schemas/Participant' } }
+        expenseDate: { type: string, format: date, example: '2026-11-25' }
+        notes: { type: string, nullable: true }
+    UpdateExpense:
+      allOf: [{ $ref: '#/components/schemas/CreateExpense' }]
+      required: []
+    Expense:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        groupId: { type: string, format: uuid }
+        description: { type: string }
+        amount: { type: number }
+        currency: { type: string }
+        paidBy: { type: string, format: uuid }
+        category: { type: string }
+        splitType: { type: string, enum: [equal, exact, percent, shares] }
+        expenseDate: { type: string, format: date }
+        notes: { type: string, nullable: true }
+        splits:
+          type: array
+          items:
+            type: object
+            properties:
+              userId: { type: string, format: uuid }
+              amount: { type: number }
+              shareValue: { type: number, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateSettlement:
+      type: object
+      required: [fromUserId, toUserId, amount]
+      properties:
+        fromUserId: { type: string, format: uuid }
+        toUserId: { type: string, format: uuid }
+        amount: { type: number, exclusiveMinimum: 0 }
+        note: { type: string, nullable: true }
+        settledAt: { type: string, format: date }
+    Settlement:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        groupId: { type: string, format: uuid }
+        fromUserId: { type: string, format: uuid }
+        toUserId: { type: string, format: uuid }
+        amount: { type: number }
+        currency: { type: string }
+        note: { type: string, nullable: true }
+        settledAt: { type: string, format: date }
+        createdAt: { type: string, format: date-time }
+    Transfer:
+      type: object
+      properties:
+        from: { type: string, format: uuid }
+        to: { type: string, format: uuid }
+        amount: { type: number }
+    GroupBalances:
+      type: object
+      properties:
+        group: { $ref: '#/components/schemas/Group' }
+        currency: { type: string }
+        totalSpent: { type: number }
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              user: { $ref: '#/components/schemas/User' }
+              paid: { type: number }
+              share: { type: number }
+              net: { type: number, description: Positive = is owed, negative = owes }
+        pairwise: { type: array, items: { $ref: '#/components/schemas/Transfer' } }
+        suggestedSettlements: { type: array, items: { $ref: '#/components/schemas/Transfer' } }
+    UserBalances:
+      type: object
+      properties:
+        userId: { type: string, format: uuid }
+        groups:
+          type: array
+          items:
+            type: object
+            properties:
+              group: { $ref: '#/components/schemas/Group' }
+              currency: { type: string }
+              net: { type: number }
+        totals:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              owed: { type: number }
+              owing: { type: number }
+              net: { type: number }
+    ActivityItem:
+      type: object
+      properties:
+        type: { type: string, enum: [expense, settlement] }
+        id: { type: string, format: uuid }
+        title: { type: string }
+        amount: { type: number }
+        currency: { type: string }
+        actorId: { type: string, format: uuid }
+        counterpartyId: { type: string, format: uuid, nullable: true }
+        category: { type: string }
+        happenedAt: { type: string, format: date }
+        createdAt: { type: string, format: date-time }
+        deleted: { type: boolean }
